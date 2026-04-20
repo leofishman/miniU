@@ -1,6 +1,7 @@
 use serde::{Serialize, Deserialize};
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use sqlx::PgPool;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -23,8 +24,10 @@ pub struct ChatRequest<'a> {
     pub stream: bool,
 }
 
+
+#[async_trait]
 pub trait LlmClient {
-    fn chat(&self, messages: &[ChatMessage]) -> Result<String, String>;
+    async fn chat(&self, messages: &[ChatMessage], pool: &PgPool) -> Result<String, String>;
 }
 
 pub struct OpenAiClient {
@@ -64,7 +67,7 @@ struct ResponseMessage {
 }
 
 impl LlmClient for OpenAiClient {
-    fn chat(&self, messages: &[ChatMessage]) -> Result<String, String> {
+    async fn chat(&self, messages: &[ChatMessage], pool: &PgPool) -> Result<String, String> {
         let request_body = ChatRequest {
             model: &self.model,
             messages,
