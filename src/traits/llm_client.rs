@@ -2,21 +2,29 @@ use serde::{Serialize, Deserialize};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    User,
+    Assistant,
+    System,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ChatMessage {
-    pub role: String,
+    pub role: Role,
     pub content: String,
 }
 
 #[derive(Serialize, Debug)]
-pub struct ChatRequest {
-    pub model: String,
-    pub messages: Vec<ChatMessage>,
+pub struct ChatRequest<'a> {
+    pub model: &'a str,
+    pub messages: &'a [ChatMessage],
     pub stream: bool,
 }
 
 pub trait LlmClient {
-    fn chat(&self, messages: Vec<ChatMessage>) -> Result<String, String>;
+    fn chat(&self, messages: &[ChatMessage]) -> Result<String, String>;
 }
 
 pub struct OpenAiClient {
@@ -56,9 +64,9 @@ struct ResponseMessage {
 }
 
 impl LlmClient for OpenAiClient {
-    fn chat(&self, messages: Vec<ChatMessage>) -> Result<String, String> {
+    fn chat(&self, messages: &[ChatMessage]) -> Result<String, String> {
         let request_body = ChatRequest {
-            model: self.model.clone(),
+            model: &self.model,
             messages,
             stream: false,
         };
@@ -128,8 +136,8 @@ impl LlmClient for OpenAiClient {
                 eprintln!("-----------------\n");
             }
 
-            if let Some(choice) = chat_completion.choices.first() {
-                return Ok(choice.message.content.clone());
+            if let Some(choice) = chat_completion.choices.into_iter().next() {
+                return Ok(choice.message.content);
             }
         }
         
