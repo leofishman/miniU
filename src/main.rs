@@ -1,28 +1,45 @@
+
+
 mod traits;
-mod memory;
+mod modules;
 
+use crate::modules::memory::Conversation;
 use crate::traits::llm_client::OpenAiClient;
-use crate::memory::Conversation;
+use dotenvy::dotenv;
+use sqlx::PgPool;
+use std::env;
 use std::io::{self, Write};
+use uuid::Uuid;
 
-const ENCRYPTION_KEY: &str = "";
-const MODEL: &str = "ggml-org/gemma-4-26B-A4B-it-GGUF:Q4_K_M";
-const BASE_URL: &str = "localhost:8080";
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenv().ok(); 
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL no definida");
+    let llm_url = env::var("LLM_BASE_URL").expect("LLM_BASE_URL no definida");
+    let model = env::var("MODEL_NAME").expect("MODEL_NAME no definido");
+
+    // 1. Conexión única
+    let pool = PgPool::connect(&database_url).await?;
+
+    // 2. Inicialización (solo una vez)
+    crate::modules::memory::database::init_db(&pool).await?;
+
     let client = OpenAiClient {
-        api_key: ENCRYPTION_KEY.to_string(),
-        base_url: BASE_URL.to_string(),
-        model: MODEL.to_string(),
+        api_key: "".to_string(),
+        base_url: llm_url,
+        model,
     };
 
-    let mut conversation = Conversation {
-        client,
-        history: Vec::new(),
-    };
+    // 3. Iniciar sesión (podrías usar un UUID fijo para "mismo usuario")
+    let session_id = Uuid::new_v4(); 
+    let limit = 10;
+
+    // Usamos el constructor asíncrono que carga el historial
+    let mut conversation = Conversation::new(client, session_id, limit, &pool).await?;
 
     println!("--- miniU Chat System ---");
+    println!("Session ID: {}", session_id);
     println!("Type 'exit' or 'quit' to stop.\n");
 
     loop {
@@ -41,7 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        match conversation.ask(input.to_string()) {
+        // Llamada asíncrona a ask
+        match conversation.ask(input.to_string(), &pool).await {
             Ok(response) => {
                 println!("\nAssistant: {}\n", response);
             }
