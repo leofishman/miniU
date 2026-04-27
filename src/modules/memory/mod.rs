@@ -18,12 +18,9 @@ impl Conversation {
         limit: usize, 
         pool: &PgPool
     ) -> Result<Self, String> {
-        // 1. Intentamos cargar el historial existente
         let mut history = Self::load_history(pool, &session_id)
             .await
             .map_err(|e| e.to_string())?;
-
-        // 2. Si es una sesión nueva (vacía), inicializamos el System Prompt
         if history.is_empty() {
             let system_msg = ChatMessage {
                 role: Role::System,

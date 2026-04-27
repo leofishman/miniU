@@ -4,7 +4,7 @@ mod traits;
 mod modules;
 
 use crate::modules::memory::Conversation;
-use crate::traits::llm_client::OpenAiClient;
+use crate::traits::llm_client::{OpenAiClient, LlmClient};
 use dotenvy::dotenv;
 use sqlx::PgPool;
 use std::env;
@@ -38,9 +38,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Usamos el constructor asíncrono que carga el historial
     let mut conversation = Conversation::new(client, session_id, limit, &pool).await?;
 
+    let models: Vec<String> = conversation.client.list_models().await?;
     println!("--- miniU Chat System ---");
     println!("Session ID: {}", session_id);
-    println!("Type 'exit' or 'quit' to stop.\n");
+    println!("Available models: {:#?}", models);
+    println!("Type 'exit' or 'quit' to stop.\n");       
+
+    let model_name = env::var("MODEL_NAME").expect("MODEL_NAME no definida");   
+    println!("\nCurrent model: {}", model_name);    
+
+    let mut input_model = String::new();
+    io::stdin().read_line(&mut input_model)?; 
+    let input_model = input_model.trim(); 
+    if input_model != model_name {
+        if !models.contains(&input_model.to_string()) {
+            println!("Model not found");
+            return Err("Model not found".into());
+        } 
+        conversation.client.model = input_model.to_string();
+    }   
+    
 
     loop {
         print!("User: ");
