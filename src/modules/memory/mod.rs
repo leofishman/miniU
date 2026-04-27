@@ -1,6 +1,8 @@
 use crate::traits::llm_client::{ChatMessage, OpenAiClient, LlmClient, Role};
 use sqlx::PgPool;
 use uuid::Uuid;
+use dotenvy::dotenv;
+use std::env;
 
 pub mod database;   
 
@@ -8,7 +10,7 @@ pub struct Conversation  {
     pub client: OpenAiClient,
     pub session_id: Uuid,
     pub history: Vec<ChatMessage>,
-    pub limit: usize,
+    pub _limit: usize,
 }
 
 impl Conversation {
@@ -39,7 +41,7 @@ impl Conversation {
             client,
             session_id,
             history,
-            limit,
+            _limit: limit,
         })
     }
 
@@ -78,4 +80,16 @@ impl Conversation {
         let history = database::load_history(pool, session_id).await?;
         Ok(history)
     }
+    
+    pub fn set_model(&mut self, new_model: String, available_models: &[String]) -> Result<(), String> {
+        if !available_models.contains(&new_model) {
+            dotenv().ok(); 
+            self.client.model = env::var("MODEL_NAME").expect("MODEL_NAME no definido");
+            // TODO: download model
+            return Err(format!("Model '{}' not found. Available models: {:#?}", new_model, available_models));
+        }
+        self.client.model = new_model;
+        println!("🔄 Model updated to: {}", self.client.model);
+        Ok(())  
+    }   
 }

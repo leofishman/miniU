@@ -28,7 +28,7 @@ pub struct ChatRequest<'a> {
 
 #[async_trait]
 pub trait LlmClient {
-    async fn chat(&self, messages: &[ChatMessage], pool: &PgPool) -> Result<String, String>;
+    async fn chat(&self, messages: &[ChatMessage], _pool: &PgPool) -> Result<String, String>;
     async fn list_models(&self) -> Result<Vec<String>, String>;
 }
 
@@ -70,7 +70,7 @@ struct ResponseMessage {
 
 #[async_trait]
 impl LlmClient for OpenAiClient {
-    async fn chat(&self, messages: &[ChatMessage], pool: &PgPool) -> Result<String, String> {
+    async fn chat(&self, messages: &[ChatMessage], _pool: &PgPool) -> Result<String, String> {
         let request_body = ChatRequest {
             model: &self.model,
             messages,
