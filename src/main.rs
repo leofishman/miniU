@@ -1,5 +1,3 @@
-
-
 mod traits;
 mod modules;
 
@@ -25,10 +23,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Inicialización (solo una vez)
     crate::modules::memory::database::init_db(&pool).await?;
 
+    let http_client = reqwest::Client::new();
+
     let client = OpenAiClient {
         api_key: "".to_string(),
         base_url: llm_url,
         model: model.clone(),
+        client: http_client,
     };
 
     // 3. Iniciar sesión (podrías usar un UUID fijo para "mismo usuario")
@@ -71,6 +72,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
                 "/quit" => {
+                    break;
+                }
+                "/q" => {
                     break;
                 }
                 _ => {

@@ -1,8 +1,8 @@
+use crate::traits::cursor::{CursorBusy, SpinnerType, Cursor};
 use serde::{Serialize, Deserialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use sqlx::PgPool;
 use async_trait::async_trait;
+use futures_util::StreamExt;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -36,6 +36,7 @@ pub struct OpenAiClient {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
+    pub client: reqwest::Client,
 }
 
 #[derive(Deserialize, Debug)]
@@ -77,33 +78,34 @@ impl LlmClient for OpenAiClient {
             stream: false,
         };
 
-        let body_json = serde_json::to_vec(&request_body).map_err(|e| e.to_string())?;
+        let base = self.base_url.trim_end_matches('/');
+        let url = if base.starts_with("http") {
+            format!("{}/v1/chat/completions", base)
+        } else {
+            format!("http://{}/v1/chat/completions", base)
+        };
 
-        let mut stream = TcpStream::connect(&self.base_url).await.map_err(|e| e.to_string())?;
-        
-        let request = format!(
-            "POST /v1/chat/completions HTTP/1.1\r\n\
-Host: {}\r\n\
-Content-Type: application/json\r\n\
-Authorization: Bearer {}\r\n\
-Content-Length: {}\r\n\
-Connection: close\r\n\
-\r\n",
-            self.base_url, self.api_key, body_json.len()
-        );
+        let response = self.client.post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
 
-        stream.write_all(request.as_bytes()).await.map_err(|e| e.to_string())?;
-        stream.write_all(&body_json).await.map_err(|e| e.to_string())?;
-        stream.flush().await.map_err(|e| e.to_string())?;
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        let mut cursor = CursorBusy::new(SpinnerType::Moon);
+        let mut total_bytes = 0;
 
-        let mut response = String::new();
-        stream.read_to_string(&mut response).await.map_err(|e| e.to_string())?;
-        
-        let final_body = parse_http_response(&response)?;
-        let json_body = final_body.trim();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| e.to_string())?;
+            total_bytes += chunk.len();
+            cursor.tick(&format!("Processing... {} bytes", total_bytes));
+            body.extend_from_slice(&chunk);
+        }
 
-        let chat_completion: ChatResponse = serde_json::from_str(json_body).map_err(|e| {
-            format!("JSON Error: {} | Raw body: {}", e, json_body)
+        let chat_completion: ChatResponse = serde_json::from_slice(&body).map_err(|e| {
+            format!("JSON Error: {} | Raw body: {}", e, String::from_utf8_lossy(&body))
         })?;
 
         // Logging info
@@ -126,25 +128,18 @@ Connection: close\r\n\
     }
 
     async fn list_models(&self) -> Result<Vec<String>, String> {
-        let mut stream = TcpStream::connect(&self.base_url).await.map_err(|e| e.to_string())?;
+        let base = self.base_url.trim_end_matches('/');
+        let url = if base.starts_with("http") {
+            format!("{}/v1/models", base)
+        } else {
+            format!("http://{}/v1/models", base)
+        };
 
-        let request = format!(
-            "GET /v1/models HTTP/1.1\r\n\
-Host: {}\r\n\
-Authorization: Bearer {}\r\n\
-Connection: close\r\n\
-\r\n",
-            self.base_url, self.api_key
-        );
-
-        stream.write_all(request.as_bytes()).await.map_err(|e| e.to_string())?;
-        stream.flush().await.map_err(|e| e.to_string())?;
-
-        let mut response = String::new();
-        stream.read_to_string(&mut response).await.map_err(|e| e.to_string())?;
-
-        let final_body = parse_http_response(&response)?;
-        let json_body = final_body.trim();
+        let response = self.client.get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
 
         #[derive(Deserialize)]
         struct ModelsResponse {
@@ -155,48 +150,8 @@ Connection: close\r\n\
             id: String,
         }
 
-        let models_data: ModelsResponse = serde_json::from_str(json_body).map_err(|e| {
-            format!("JSON Error: {} | Raw body: {}", e, json_body)
-        })?;
+        let models_data: ModelsResponse = response.json().await.map_err(|e| e.to_string())?;
 
         Ok(models_data.data.into_iter().map(|m| m.id).collect())
-    }
-}
-
-fn parse_http_response(response: &str) -> Result<String, String> {
-    let (headers, body) = response.split_once("\r\n\r\n")
-        .ok_or_else(|| "No se encontró el cuerpo de la respuesta o formato inválido".to_string())?;
-
-    let is_chunked = headers.lines()
-        .any(|l| {
-            let l = l.to_lowercase();
-            l.starts_with("transfer-encoding:") && l.contains("chunked")
-        });
-
-    if is_chunked {
-        let mut final_body = String::new();
-        let mut current = body;
-        while !current.is_empty() {
-            if let Some(chunk_pos) = current.find("\r\n") {
-                let size_str = &current[..chunk_pos].trim();
-                if let Ok(size) = usize::from_str_radix(size_str, 16) {
-                    if size == 0 { break; }
-                    let chunk_start = chunk_pos + 2;
-                    if current.len() >= chunk_start + size {
-                        final_body.push_str(&current[chunk_start..chunk_start + size]);
-                        current = &current[chunk_start + size + 2..]; // skip chunk and trailing \r\n
-                    } else {
-                        break;
-                    }
-                } else {
-                    return Err("Invalid chunk size format".to_string());
-                }
-            } else {
-                break;
-            }
-        }
-        Ok(final_body)
-    } else {
-        Ok(body.to_string())
     }
 }
