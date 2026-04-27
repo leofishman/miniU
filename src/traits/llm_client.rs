@@ -1,8 +1,9 @@
-use crate::traits::cursor::{CursorBusy, SpinnerType, Cursor};
 use serde::{Serialize, Deserialize};
 use sqlx::PgPool;
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
+use std::io::Write;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -52,30 +53,13 @@ struct Timings {
     predicted_per_second: f64,
 }
 
-#[derive(Deserialize, Debug)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-    usage: Option<Usage>,
-    timings: Option<Timings>,
-}
-
-#[derive(Deserialize, Debug)]
-struct Choice {
-    message: ResponseMessage,
-}
-
-#[derive(Deserialize, Debug)]
-struct ResponseMessage {
-    content: String,
-}
-
 #[async_trait]
 impl LlmClient for OpenAiClient {
     async fn chat(&self, messages: &[ChatMessage], _pool: &PgPool) -> Result<String, String> {
         let request_body = ChatRequest {
             model: &self.model,
             messages,
-            stream: false,
+            stream: true,
         };
 
         let base = self.base_url.trim_end_matches('/');
@@ -84,7 +68,6 @@ impl LlmClient for OpenAiClient {
         } else {
             format!("http://{}/v1/chat/completions", base)
         };
-
         let response = self.client.post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&request_body)
@@ -92,39 +75,132 @@ impl LlmClient for OpenAiClient {
             .await
             .map_err(|e| e.to_string())?;
 
-        let mut body = Vec::new();
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.map_err(|e| e.to_string())?;
+            return Err(format!("Server error {}: {}", status, body));
+        }
+
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(ProgressStyle::default_spinner()
+            .template("{spinner:.green} {msg}")
+            .unwrap());
+        pb.set_message("Processing...");
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+
         let mut stream = response.bytes_stream();
-        let mut cursor = CursorBusy::new(SpinnerType::Moon);
-        let mut total_bytes = 0;
+        let mut full_content = String::new();
+        let mut first_token = true;
+        let mut buffer = String::new();
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| e.to_string())?;
-            total_bytes += chunk.len();
-            cursor.tick(&format!("Processing... {} bytes", total_bytes));
-            body.extend_from_slice(&chunk);
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(pos) = buffer.find('\n') {
+                let line = buffer[..pos].trim().to_string();
+                buffer = buffer[pos + 1..].to_string();
+
+                if line.starts_with("data:") {
+                    let data = line["data:".len()..].trim();
+                    if data == "[DONE]" {
+                        break;
+                    }
+
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                        // Aggressively search for content in the JSON structure
+                        let mut found_content = None;
+                        
+                        if let Some(choices) = json["choices"].as_array() {
+                            for choice in choices {
+                                if let Some(delta) = choice.get("delta") {
+                                    if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                                        found_content = Some(content);
+                                        break;
+                                    }
+                                    if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+                                        found_content = Some(reasoning);
+                                        break;
+                                    }
+                                } else if let Some(text) = choice.get("text").and_then(|v| v.as_str()) {
+                                    found_content = Some(text);
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if found_content.is_none() {
+                            if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
+                                found_content = Some(content);
+                            }
+                        }
+
+                        if let Some(content) = found_content {
+                            if first_token {
+                                pb.finish_and_clear();
+                                print!("Assistant: ");
+                                std::io::stdout().flush().unwrap();
+                                first_token = false;
+                            }
+                            print!("{}", content);
+                            std::io::stdout().flush().unwrap();
+                            full_content.push_str(content);
+                        }
+                        
+                        // Handle usage and timings if present in the final stream chunk
+                        if let Some(usage_val) = json.get("usage") {
+                            if let Ok(usage) = serde_json::from_value::<Usage>(usage_val.clone()) {
+                                eprintln!("\n\n--- LLM Usage ---");
+                                eprintln!("Tokens used: {} (Prompt: {}, Completion: {})", 
+                                    usage.total_tokens, usage.prompt_tokens, usage.completion_tokens);
+                            }
+                        }
+                        if let Some(timings_val) = json.get("timings") {
+                            if let Ok(timings) = serde_json::from_value::<Timings>(timings_val.clone()) {
+                                eprintln!("Time: {:.2}s | Speed: {:.2} t/s", 
+                                    timings.predicted_ms / 1000.0, timings.predicted_per_second);
+                                eprintln!("-----------------\n");
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        let chat_completion: ChatResponse = serde_json::from_slice(&body).map_err(|e| {
-            format!("JSON Error: {} | Raw body: {}", e, String::from_utf8_lossy(&body))
-        })?;
+        // Process any remaining content in the buffer
+        if !buffer.is_empty() {
+            let line = buffer.trim();
+            if line.starts_with("data:") {
+                let data = line["data:".len()..].trim();
+                if data != "[DONE]" && !data.is_empty() {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
+                        if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                            if first_token {
+                                pb.finish_and_clear();
+                                print!("Assistant: ");
+                                std::io::stdout().flush().unwrap();
+                                first_token = false;
+                            }
+                            print!("{}", content);
+                            std::io::stdout().flush().unwrap();
+                            full_content.push_str(content);
+                        }
+                    }
+                }
+            }
+        }
 
-        // Logging info
-        if let Some(usage) = &chat_completion.usage {
-            eprintln!("\n--- LLM Usage ---");
-            eprintln!("Tokens used: {} (Prompt: {}, Completion: {})", 
-                usage.total_tokens, usage.prompt_tokens, usage.completion_tokens);
-        }
-        if let Some(timings) = &chat_completion.timings {
-            eprintln!("Time: {:.2}s | Speed: {:.2} t/s", 
-                timings.predicted_ms / 1000.0, timings.predicted_per_second);
-            eprintln!("-----------------\n");
+        if first_token {
+            pb.finish_and_clear();
+        } else {
+            println!(); // New line after streaming
         }
 
-        if let Some(choice) = chat_completion.choices.into_iter().next() {
-            return Ok(choice.message.content);
+        if full_content.is_empty() {
+            return Err("Received empty response from server. Check if the model is loaded and the server is responding correctly.".to_string());
         }
-        
-        Err("No chat completion choice found in response".to_string())
+
+        Ok(full_content)
     }
 
     async fn list_models(&self) -> Result<Vec<String>, String> {

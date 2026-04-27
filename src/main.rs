@@ -88,13 +88,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        println!("🧠 Processing your request...");
-        io::stdout().flush()?;
 
         // Llamada asíncrona a ask
         match conversation.ask(input.to_string(), &pool).await {
-            Ok(response) => {
-                println!("\nAssistant: {}\n", response);
+            Ok(_) => {
+                println!();
             }
             Err(e) => {
                 eprintln!("Error: {}", e);
