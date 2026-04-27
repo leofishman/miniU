@@ -26,7 +26,6 @@ pub struct ChatRequest<'a> {
     pub stream: bool,
 }
 
-
 #[async_trait]
 pub trait LlmClient {
     async fn chat(&self, messages: &[ChatMessage], _pool: &PgPool) -> Result<String, String>;
@@ -53,6 +52,54 @@ struct Timings {
     predicted_per_second: f64,
 }
 
+impl OpenAiClient {
+    fn get_url(&self, path: &str) -> String {
+        let base = self.base_url.trim_end_matches('/');
+        let path = path.trim_start_matches('/');
+        if base.starts_with("http") {
+            format!("{}/{}", base, path)
+        } else {
+            format!("http://{}/{}", base, path)
+        }
+    }
+
+    fn extract_content<'a>(&self, json: &'a serde_json::Value) -> Option<&'a str> {
+        if let Some(choices) = json["choices"].as_array() {
+            for choice in choices {
+                if let Some(delta) = choice.get("delta") {
+                    if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                        return Some(content);
+                    }
+                    if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+                        return Some(reasoning);
+                    }
+                } else if let Some(text) = choice.get("text").and_then(|v| v.as_str()) {
+                    return Some(text);
+                }
+            }
+        }
+        
+        json.get("content").and_then(|v| v.as_str())
+    }
+
+    fn log_metrics(&self, json: &serde_json::Value) {
+        if let Some(usage_val) = json.get("usage") {
+            if let Ok(usage) = serde_json::from_value::<Usage>(usage_val.clone()) {
+                eprintln!("\n\n--- LLM Usage ---");
+                eprintln!("Tokens used: {} (Prompt: {}, Completion: {})", 
+                    usage.total_tokens, usage.prompt_tokens, usage.completion_tokens);
+            }
+        }
+        if let Some(timings_val) = json.get("timings") {
+            if let Ok(timings) = serde_json::from_value::<Timings>(timings_val.clone()) {
+                eprintln!("Time: {:.2}s | Speed: {:.2} t/s", 
+                    timings.predicted_ms / 1000.0, timings.predicted_per_second);
+                eprintln!("-----------------\n");
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl LlmClient for OpenAiClient {
     async fn chat(&self, messages: &[ChatMessage], _pool: &PgPool) -> Result<String, String> {
@@ -62,13 +109,7 @@ impl LlmClient for OpenAiClient {
             stream: true,
         };
 
-        let base = self.base_url.trim_end_matches('/');
-        let url = if base.starts_with("http") {
-            format!("{}/v1/chat/completions", base)
-        } else {
-            format!("http://{}/v1/chat/completions", base)
-        };
-        let response = self.client.post(&url)
+        let response = self.client.post(&self.get_url("/v1/chat/completions"))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&request_body)
             .send()
@@ -108,34 +149,7 @@ impl LlmClient for OpenAiClient {
                     }
 
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                        // Aggressively search for content in the JSON structure
-                        let mut found_content = None;
-                        
-                        if let Some(choices) = json["choices"].as_array() {
-                            for choice in choices {
-                                if let Some(delta) = choice.get("delta") {
-                                    if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
-                                        found_content = Some(content);
-                                        break;
-                                    }
-                                    if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-                                        found_content = Some(reasoning);
-                                        break;
-                                    }
-                                } else if let Some(text) = choice.get("text").and_then(|v| v.as_str()) {
-                                    found_content = Some(text);
-                                    break;
-                                }
-                            }
-                        }
-                        
-                        if found_content.is_none() {
-                            if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
-                                found_content = Some(content);
-                            }
-                        }
-
-                        if let Some(content) = found_content {
+                        if let Some(content) = self.extract_content(&json) {
                             if first_token {
                                 pb.finish_and_clear();
                                 print!("Assistant: ");
@@ -146,22 +160,7 @@ impl LlmClient for OpenAiClient {
                             std::io::stdout().flush().unwrap();
                             full_content.push_str(content);
                         }
-                        
-                        // Handle usage and timings if present in the final stream chunk
-                        if let Some(usage_val) = json.get("usage") {
-                            if let Ok(usage) = serde_json::from_value::<Usage>(usage_val.clone()) {
-                                eprintln!("\n\n--- LLM Usage ---");
-                                eprintln!("Tokens used: {} (Prompt: {}, Completion: {})", 
-                                    usage.total_tokens, usage.prompt_tokens, usage.completion_tokens);
-                            }
-                        }
-                        if let Some(timings_val) = json.get("timings") {
-                            if let Ok(timings) = serde_json::from_value::<Timings>(timings_val.clone()) {
-                                eprintln!("Time: {:.2}s | Speed: {:.2} t/s", 
-                                    timings.predicted_ms / 1000.0, timings.predicted_per_second);
-                                eprintln!("-----------------\n");
-                            }
-                        }
+                        self.log_metrics(&json);
                     }
                 }
             }
@@ -174,7 +173,7 @@ impl LlmClient for OpenAiClient {
                 let data = line["data:".len()..].trim();
                 if data != "[DONE]" && !data.is_empty() {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(content) = json["choices"][0]["delta"]["content"].as_str() {
+                        if let Some(content) = self.extract_content(&json) {
                             if first_token {
                                 pb.finish_and_clear();
                                 print!("Assistant: ");
@@ -204,14 +203,7 @@ impl LlmClient for OpenAiClient {
     }
 
     async fn list_models(&self) -> Result<Vec<String>, String> {
-        let base = self.base_url.trim_end_matches('/');
-        let url = if base.starts_with("http") {
-            format!("{}/v1/models", base)
-        } else {
-            format!("http://{}/v1/models", base)
-        };
-
-        let response = self.client.get(&url)
+        let response = self.client.get(&self.get_url("/v1/models"))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .send()
             .await
@@ -227,7 +219,6 @@ impl LlmClient for OpenAiClient {
         }
 
         let models_data: ModelsResponse = response.json().await.map_err(|e| e.to_string())?;
-
         Ok(models_data.data.into_iter().map(|m| m.id).collect())
     }
 }
