@@ -2,8 +2,12 @@ use serde::{Serialize, Deserialize};
 use sqlx::PgPool;
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
 use std::io::Write;
+use std::fs::OpenOptions;
+
+// remove after getting uuid from conversation
+use crate::Uuid;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -52,6 +56,12 @@ struct Timings {
     predicted_per_second: f64,
 }
 
+enum Delta {
+    Content(String),
+    Reasoning(String),
+    None,
+}
+
 impl OpenAiClient {
     fn get_url(&self, path: &str) -> String {
         let base = self.base_url.trim_end_matches('/');
@@ -62,24 +72,37 @@ impl OpenAiClient {
             format!("http://{}/{}", base, path)
         }
     }
-
-    fn extract_content<'a>(&self, json: &'a serde_json::Value) -> Option<&'a str> {
+    
+    fn extract_delta<'a>(&self, json: &'a serde_json::Value) -> Delta { 
         if let Some(choices) = json["choices"].as_array() {
-            for choice in choices {
-                if let Some(delta) = choice.get("delta") {
-                    if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
-                        return Some(content);
-                    }
-                    if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-                        return Some(reasoning);
-                    }
-                } else if let Some(text) = choice.get("text").and_then(|v| v.as_str()) {
-                    return Some(text);
+            if let Some(delta) = choices.get(0).and_then(|c| c.get("delta")) {
+                // Caso 1: Hay razonamiento (pensamiento interno)
+                if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+                    return Delta::Reasoning(reasoning.to_string());
+                }
+                // Caso 2: Hay contenido real (respuesta)
+                if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                    return Delta::Content(content.to_string());
                 }
             }
         }
+        Delta::None
+    }
+
+    fn log_reasoning(&self, content: &str, session_id: &Uuid) {
+        if content.is_empty() { return; }
+        // Crear la carpeta logs si no existe
+        let _ = std::fs::create_dir_all("logs");
+        // TODO: Add logging filename by session_id from Conversation struct 
+        let log_file = format!("logs/{}.log", session_id);
         
-        json.get("content").and_then(|v| v.as_str())
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_file) {
+                let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                let _ = writeln!(file, "\n--- SESSION {} [{}] ---\n{}", self.model, timestamp, content);
+            }
     }
 
     fn log_metrics(&self, json: &serde_json::Value) {
@@ -88,10 +111,12 @@ impl OpenAiClient {
                 eprintln!("\n\n--- LLM Usage ---");
                 eprintln!("Tokens used: {} (Prompt: {}, Completion: {})", 
                     usage.total_tokens, usage.prompt_tokens, usage.completion_tokens);
+                eprintln!("-----------------");
             }
         }
         if let Some(timings_val) = json.get("timings") {
             if let Ok(timings) = serde_json::from_value::<Timings>(timings_val.clone()) {
+                eprintln!("\n--- Performance ---");
                 eprintln!("Time: {:.2}s | Speed: {:.2} t/s", 
                     timings.predicted_ms / 1000.0, timings.predicted_per_second);
                 eprintln!("-----------------\n");
@@ -121,20 +146,33 @@ impl LlmClient for OpenAiClient {
             let body = response.text().await.map_err(|e| e.to_string())?;
             return Err(format!("Server error {}: {}", status, body));
         }
+        
+        let multi = MultiProgress::new();
 
-        let pb = ProgressBar::new_spinner();
-        pb.set_style(ProgressStyle::default_spinner()
-            .template("{spinner:.green} {msg}")
+        // NIVEL 1: Estado General
+        let pb_main = multi.add(ProgressBar::new_spinner());
+        pb_main.set_style(ProgressStyle::default_spinner().template("{spinner:.green} {msg}").unwrap());
+        pb_main.set_message("Conectando con el cerebro...");
+        pb_main.enable_steady_tick(std::time::Duration::from_millis(100));
+
+        // NIVEL 2: Razonamiento
+        let pb_reasoning = multi.add(ProgressBar::new_spinner());
+        pb_reasoning.set_style(ProgressStyle::default_spinner()
+            .template("\x1b[2m{spinner:.blue} [Pensando]: {msg}\x1b[0m") 
             .unwrap());
-        pb.set_message("Processing...");
-        pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
-        let mut stream = response.bytes_stream();
-        let mut full_content = String::new();
-        let mut first_token = true;
+let mut stream = response.bytes_stream();
         let mut buffer = String::new();
+        let mut stream_done = false;
+        
+        // --- VARIABLES CORREGIDAS ---
+        let mut reasoning_full = String::new();
+        let mut response_full = String::new(); // Este será el contenido final
+        let mut first_content_token = true;    // Booleano para el control del primer token
+        // ----------------------------
 
         while let Some(chunk) = stream.next().await {
+            if stream_done { break; }
             let chunk = chunk.map_err(|e| e.to_string())?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -143,22 +181,37 @@ impl LlmClient for OpenAiClient {
                 buffer = buffer[pos + 1..].to_string();
 
                 if line.starts_with("data:") {
-                    let data = line["data:".len()..].trim();
-                    if data == "[DONE]" {
-                        break;
+                    let data = &line["data:".len()..].trim();
+                    if *data == "[DONE]" { 
+                        stream_done = true;
+                        break; 
                     }
 
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(content) = self.extract_content(&json) {
-                            if first_token {
-                                pb.finish_and_clear();
-                                print!("Assistant: ");
-                                std::io::stdout().flush().unwrap();
-                                first_token = false;
+                        match self.extract_delta(&json) {
+                            Delta::Reasoning(r) => {
+                                pb_main.set_message("Generando razonamiento...");
+                                // El replace es para que no rompa la línea del spinner
+                                pb_reasoning.set_message(r.clone().replace('\n', " "));
+                                reasoning_full.push_str(&r);
                             }
-                            print!("{}", content);
-                            std::io::stdout().flush().unwrap();
-                            full_content.push_str(content);
+                            Delta::Content(c) => {
+                                if first_content_token {
+                                    pb_main.finish_and_clear();
+                                    pb_reasoning.finish_and_clear();
+                                    
+                                    // Log de razonamiento (ahora que sabemos que empezó la respuesta)
+                                    self.log_reasoning(&reasoning_full, &uuid::Uuid::nil()); 
+                                    
+                                    print!("Assistant: ");
+                                    std::io::stdout().flush().unwrap();
+                                    first_content_token = false;
+                                }
+                                print!("{}", c);
+                                std::io::stdout().flush().unwrap();
+                                response_full.push_str(&c);
+                            }
+                            Delta::None => {}
                         }
                         self.log_metrics(&json);
                     }
@@ -166,40 +219,18 @@ impl LlmClient for OpenAiClient {
             }
         }
 
-        // Process any remaining content in the buffer
-        if !buffer.is_empty() {
-            let line = buffer.trim();
-            if line.starts_with("data:") {
-                let data = line["data:".len()..].trim();
-                if data != "[DONE]" && !data.is_empty() {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                        if let Some(content) = self.extract_content(&json) {
-                            if first_token {
-                                pb.finish_and_clear();
-                                print!("Assistant: ");
-                                std::io::stdout().flush().unwrap();
-                                first_token = false;
-                            }
-                            print!("{}", content);
-                            std::io::stdout().flush().unwrap();
-                            full_content.push_str(content);
-                        }
-                    }
-                }
-            }
+        // Limpieza final de barras si no se limpiaron antes
+        if first_content_token {
+            pb_main.finish_and_clear();
+            pb_reasoning.finish_and_clear();
+        }
+        println!(); 
+
+        if response_full.is_empty() {
+            return Err("El modelo no devolvió ninguna respuesta.".to_string());
         }
 
-        if first_token {
-            pb.finish_and_clear();
-        } else {
-            println!(); // New line after streaming
-        }
-
-        if full_content.is_empty() {
-            return Err("Received empty response from server. Check if the model is loaded and the server is responding correctly.".to_string());
-        }
-
-        Ok(full_content)
+        Ok(response_full)
     }
 
     async fn list_models(&self) -> Result<Vec<String>, String> {
