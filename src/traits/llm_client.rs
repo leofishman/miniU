@@ -76,11 +76,9 @@ impl OpenAiClient {
     fn extract_delta<'a>(&self, json: &'a serde_json::Value) -> Delta { 
         if let Some(choices) = json["choices"].as_array() {
             if let Some(delta) = choices.get(0).and_then(|c| c.get("delta")) {
-                // Caso 1: Hay razonamiento (pensamiento interno)
                 if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
                     return Delta::Reasoning(reasoning.to_string());
                 }
-                // Caso 2: Hay contenido real (respuesta)
                 if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
                     return Delta::Content(content.to_string());
                 }
@@ -101,7 +99,7 @@ impl OpenAiClient {
             .append(true)
             .open(&log_file) {
                 let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                let _ = writeln!(file, "\n--- SESSION {} [{}] ---\n{}", self.model, timestamp, content);
+                let _ = writeln!(file, "\n--- SESSION {} [{}] ---\n{}\n", self.model, timestamp, content);
             }
     }
 
@@ -116,8 +114,8 @@ impl OpenAiClient {
         }
         if let Some(timings_val) = json.get("timings") {
             if let Ok(timings) = serde_json::from_value::<Timings>(timings_val.clone()) {
-                eprintln!("\n--- Performance ---");
-                eprintln!("Time: {:.2}s | Speed: {:.2} t/s", 
+                eprintln!("\n\n--- Performance ---");
+                eprintln!("\t\tTime: {:.2}s \t|\t Speed: {:.2} t/s", 
                     timings.predicted_ms / 1000.0, timings.predicted_per_second);
                 eprintln!("-----------------\n");
             }

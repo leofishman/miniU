@@ -51,23 +51,30 @@ impl Conversation {
             role: Role::User,
             content: question,
         };
-
-        database::save_single_message(pool, &self.session_id, &user_msg)
-            .await
-            .map_err(|e| e.to_string())?;
-        
+        database::save_single_message(pool, &self.session_id, &user_msg).await.map_err(|e| e.to_string())?;
         self.history.push(user_msg);
 
-        let response_text = self.client.chat(&self.history, pool).await?;
+        // Always include the first message (System) and the last N messages
+        let mut context_to_send = Vec::new();
+        if !self.history.is_empty() {
+            context_to_send.push(self.history[0].clone()); // The System Prompt
+            
+            let tail_start = if self.history.len() > self._limit {
+                self.history.len() - self._limit
+            } else {
+                1 // Start after the System Prompt
+            };
+            
+            context_to_send.extend(self.history[tail_start..].iter().cloned());
+        }
+
+        let response_text = self.client.chat(&context_to_send, pool).await?;
+
         let assistant_msg = ChatMessage {
             role: Role::Assistant,
             content: response_text.clone(),
         };
-
-        database::save_single_message(pool, &self.session_id, &assistant_msg)
-            .await
-            .map_err(|e| e.to_string())?;
-
+        database::save_single_message(pool, &self.session_id, &assistant_msg).await.map_err(|e| e.to_string())?;
         self.history.push(assistant_msg);
 
         Ok(response_text)

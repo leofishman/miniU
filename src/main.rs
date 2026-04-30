@@ -46,8 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         print!("User: ");
         io::stdout().flush()?;
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
+        //TODO: change input method to support multi line strings   
+        let mut input = String::new();  
+        let _ = io::stdin().read_line(&mut input)?;
         let input = input.trim();
 
         if input.starts_with("/") {
