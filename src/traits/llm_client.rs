@@ -62,6 +62,14 @@ enum Delta {
     None,
 }
 
+pub struct MemoryStatus {
+    pub history_count: usize,
+    pub buffer_limit: usize,
+    pub summary_length: usize,
+}
+
+
+
 impl OpenAiClient {
     fn get_url(&self, path: &str) -> String {
         let base = self.base_url.trim_end_matches('/');
@@ -121,6 +129,25 @@ impl OpenAiClient {
             }
         }
     }
+
+    async fn call_completions(
+        &self, 
+        messages: &[ChatMessage], 
+        stream: bool
+    ) -> Result<reqwest::Response, String> {
+        let request_body = ChatRequest {
+            model: &self.model,
+            messages,
+            stream,
+        };
+
+        self.client.post(&self.get_url("/v1/chat/completions"))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[async_trait]
@@ -131,7 +158,6 @@ impl LlmClient for OpenAiClient {
             messages,
             stream: true,
         };
-
         let response = self.client.post(&self.get_url("/v1/chat/completions"))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&request_body)
@@ -159,15 +185,13 @@ impl LlmClient for OpenAiClient {
             .template("\x1b[2m{spinner:.blue} [Pensando]: {msg}\x1b[0m") 
             .unwrap());
 
-let mut stream = response.bytes_stream();
+        let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut stream_done = false;
         
-        // --- VARIABLES CORREGIDAS ---
         let mut reasoning_full = String::new();
-        let mut response_full = String::new(); // Este será el contenido final
-        let mut first_content_token = true;    // Booleano para el control del primer token
-        // ----------------------------
+        let mut response_full = String::new();
+        let mut first_content_token = true;
 
         while let Some(chunk) = stream.next().await {
             if stream_done { break; }

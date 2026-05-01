@@ -10,7 +10,8 @@ pub struct Conversation  {
     pub client: OpenAiClient,
     pub session_id: Uuid,
     pub history: Vec<ChatMessage>,
-    pub _limit: usize,
+    pub buffer_limit: usize,
+    pub summary: String,
 }
 
 impl Conversation {
@@ -29,7 +30,6 @@ impl Conversation {
                 content: "Eres un asistente experto en Rust y bases de datos.".to_string(),
             };
             
-            // Guardamos el primer mensaje en la DB inmediatamente
             database::save_single_message(pool, &session_id, &system_msg)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -41,7 +41,8 @@ impl Conversation {
             client,
             session_id,
             history,
-            _limit: limit,
+            buffer_limit: limit,
+            summary: String::new(), 
         })
     }
 
@@ -59,8 +60,8 @@ impl Conversation {
         if !self.history.is_empty() {
             context_to_send.push(self.history[0].clone()); // The System Prompt
             
-            let tail_start = if self.history.len() > self._limit {
-                self.history.len() - self._limit
+            let tail_start = if self.history.len() > self.buffer_limit {
+                self.history.len() - self.buffer_limit
             } else {
                 1 // Start after the System Prompt
             };
