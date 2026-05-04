@@ -14,6 +14,17 @@ pub struct Conversation  {
     pub summary: String,
 }
 
+impl std::fmt::Debug for Conversation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Conversation")
+            .field("session_id", &self.session_id)
+            .field("history", &self.history)
+            .field("buffer_limit", &self.buffer_limit)
+            .field("summary", &self.summary)
+            .finish()
+    }
+}
+    
 impl Conversation {
     pub async fn new(
         client: OpenAiClient, 

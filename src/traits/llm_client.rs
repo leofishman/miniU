@@ -130,6 +130,23 @@ impl OpenAiClient {
         }
     }
 
+    pub async fn chat_raw(&self, messages: &[ChatMessage]) -> Result<String, String> {
+        let response = self.call_completions(messages, false).await?;
+
+        if !response.status().is_success() {
+            return Err(format!("Server error: {}", response.status()));
+        }
+
+        // Para tareas raw, parseamos el JSON completo de la respuesta de OpenAI
+        let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+        
+        // Extraemos el contenido del primer choice
+        json["choices"][0]["message"]["content"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| "No se encontró contenido en la respuesta raw".to_string())
+    }
+
     async fn call_completions(
         &self, 
         messages: &[ChatMessage], 

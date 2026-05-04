@@ -38,6 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Usamos el constructor asíncrono que carga el historial
     let mut conversation = Conversation::new(client, session_id, limit, &pool).await?;
+    dbg!(&conversation); 
+
 
     ask_model(&mut conversation, model.clone(), &pool).await?;
     println!("Type 'exit' or 'quit' to stop.\n");       

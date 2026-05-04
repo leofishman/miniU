@@ -18,10 +18,8 @@ impl ImportanceScorer for OpenAiClient {
             ChatMessage { role: Role::User, content: format!("Evalúa este mensaje: '{}'", message.content) },
         ];
 
-        // TODO: Tendríamos que adaptar chat() o crear una chat_json() en OpenAiClient.
-        let raw_response = self.chat(&messages, _pool).await?; // Asumiendo stream:false temporalmente
+        let raw_response = self.chat_raw(&messages, _pool).await?; 
 
-        // 3. Parseo y Validación del JSON
         let json_score: serde_json::Value = serde_json::from_str(&raw_response)
             .map_err(|e| format!("Error parseando puntuación: {}", e))?;
 
