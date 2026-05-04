@@ -9,7 +9,8 @@ This is a personal learning project, the goal is to create an AI assistant in a 
 - **🚀 Async & Fast**: Built on top of `tokio` and `reqwest` for non-blocking IO and high performance.
 - **💾 Persistent Memory**: Automatically saves and loads chat history from a PostgreSQL database using `sqlx`.
 - **🔄 Dynamic Model Switching**: List and switch between available models on the server at runtime using the `/model` command.
-- **🎨 Visual Feedback**: Custom-built synchronous terminal spinner (`Cursor`) to provide feedback during network operations.
+- **🎨 Visual Feedback**: Interactive terminal progress bars and spinners using `indicatif` to provide real-time feedback during network operations, reasoning phases, and streaming generation.
+- **🧠 Reasoning Models Support**: Detects and streams model reasoning/thinking phases separately from the final response.
 - **🧩 Modular Architecture**: Trait-based LLM client design (`LlmClient`), making it easy to extend for different providers.
 - **📊 Usage Metrics**: Real-time tracking of token usage, generation speed (tokens/sec), and latency.
 
@@ -59,8 +60,9 @@ During the chat session, you can use the following commands:
 ## 🏗️ Project Structure
 
 - `src/main.rs`: Entry point and CLI loop.
-- `src/traits/llm_client.rs`: OpenAI-compatible client implementation.
-- `src/traits/cursor.rs`: Terminal spinner and visual feedback logic.
+- `src/traits/llm_client.rs`: OpenAI-compatible client implementation with streaming and reasoning support.
+- `src/traits/llm_scorer.rs`: LLM-based importance scoring for conversation memory management.
+- `src/traits/summarizer.rs`: Conversation history summarization logic.
 - `src/modules/memory/`: Database logic and conversation state management.
 
 ## 📜 License
