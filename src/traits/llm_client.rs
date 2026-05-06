@@ -36,6 +36,7 @@ pub trait LlmClient {
     async fn list_models(&self) -> Result<Vec<String>, String>;
 }
 
+#[derive(Clone)]
 pub struct OpenAiClient {
     pub api_key: String,
     pub base_url: String,

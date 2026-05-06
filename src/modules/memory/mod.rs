@@ -9,7 +9,7 @@ use uuid::Uuid;
 pub mod database;
 
 pub struct Conversation {
-    pub client: Arc<OpenAiClient>,
+    pub client: OpenAiClient,
     pub session_id: Uuid,
     pub history: Vec<ChatMessage>,
     pub buffer_limit: usize,
@@ -35,7 +35,6 @@ impl Conversation {
         session_id: Uuid,
         limit: usize,
         pool: &PgPool,
-        reflection_task: None,
     ) -> Result<Self, String> {
         let mut history = Self::load_history(pool, &session_id)
             .await
@@ -55,17 +54,17 @@ impl Conversation {
         }
 
         Ok(Self {
-            client: Arc::new(client),
+            client,
             session_id,
             history,
             buffer_limit: limit,
             summary: String::new(),
-            reflexion_task: reflection_task,
+            reflexion_task: None,
         })
     }
 
     pub async fn ask(&mut self, question: String, pool: &PgPool) -> Result<String, String> {
-        if let Some(handle) = self.reflection_task.take() {
+        if let Some(handle) = self.reflexion_task.take() {
             handle.abort();
             // println!("[System] Tarea de reflexión anterior cancelada para priorizar el nuevo mensaje.");
         }
@@ -100,6 +99,13 @@ impl Conversation {
         let session_id_bg = self.session_id.clone();
         let history_for_reflexion = self.history.clone();
 
+        let assistant_msg = ChatMessage {
+            role: Role::Assistant,
+            content: response_text.clone(),
+        };
+        let assistant_msg_bg = assistant_msg.clone();
+        self.history.push(assistant_msg);
+
         let handle = tokio::spawn(async move {
             // Guardado en DB y futura reflexión...
             let _ =
@@ -111,13 +117,9 @@ impl Conversation {
             // println!("[Background] Reflexión completada.");
         });
 
-        self.reflection_task = Some(handle);
+        self.reflexion_task = Some(handle);
 
-        let assistant_msg = ChatMessage {
-            role: Role::Assistant,
-            content: response_text.clone(),
-        };
-        self.history.push(assistant_msg);
+
 
         Ok(response_text)
     }

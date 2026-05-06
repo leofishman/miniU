@@ -8,6 +8,7 @@ use sqlx::PgPool;
 use std::env;
 use std::io::{self, Write};
 use uuid::Uuid;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,12 +26,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let http_client = reqwest::Client::new();
 
-    let client = Arc::new(OpenAiClient {
+    let client = OpenAiClient {
         api_key: "".to_string(),
         base_url: llm_url,
         model: model.clone(),
         client: http_client,
-    });
+    };
 
     // 3. Iniciar sesión (podrías usar un UUID fijo para "mismo usuario")
     let session_id = Uuid::new_v4();
