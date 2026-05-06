@@ -1,8 +1,8 @@
-mod traits;
 mod modules;
+mod traits;
 
 use crate::modules::memory::Conversation;
-use crate::traits::llm_client::{OpenAiClient, LlmClient};
+use crate::traits::llm_client::{LlmClient, OpenAiClient};
 use dotenvy::dotenv;
 use sqlx::PgPool;
 use std::env;
@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenv().ok(); 
+    dotenv().ok();
 
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL no definida");
     let llm_url = env::var("LLM_BASE_URL").expect("LLM_BASE_URL no definida");
@@ -25,31 +25,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let http_client = reqwest::Client::new();
 
-    let client = OpenAiClient {
+    let client = Arc::new(OpenAiClient {
         api_key: "".to_string(),
         base_url: llm_url,
         model: model.clone(),
         client: http_client,
-    };
+    });
 
     // 3. Iniciar sesión (podrías usar un UUID fijo para "mismo usuario")
-    let session_id = Uuid::new_v4(); 
+    let session_id = Uuid::new_v4();
     let limit = 10;
 
     // Usamos el constructor asíncrono que carga el historial
     let mut conversation = Conversation::new(client, session_id, limit, &pool).await?;
-    dbg!(&conversation); 
-
+    dbg!(&conversation);
 
     ask_model(&mut conversation, model.clone(), &pool).await?;
-    println!("Type 'exit' or 'quit' to stop.\n");       
+    println!("Type 'exit' or 'quit' to stop.\n");
 
     loop {
         print!("User: ");
         io::stdout().flush()?;
 
-        //TODO: change input method to support multi line strings   
-        let mut input = String::new();  
+        //TODO: change input method to support multi line strings
+        let mut input = String::new();
         let _ = io::stdin().read_line(&mut input)?;
         let input = input.trim();
 
@@ -83,14 +82,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 _ => {
                     eprintln!("Unknown command: {}", command);
                 }
-            }   
+            }
             continue;
         }
 
         if input.is_empty() {
             continue;
         }
-
 
         // Llamada asíncrona a ask
         match conversation.ask(input.to_string(), &pool).await {
@@ -106,21 +104,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn ask_model(conversation: &mut Conversation, model: String, _pool: &PgPool) -> Result<String, Box<dyn std::error::Error>> {
+async fn ask_model(
+    conversation: &mut Conversation,
+    model: String,
+    _pool: &PgPool,
+) -> Result<String, Box<dyn std::error::Error>> {
     print!("📡 Fetching model list from server...");
     io::stdout().flush()?;
-    
+
     let models: Vec<String> = conversation.client.list_models().await?;
 
-    println!("📡 Fetched {} models from server.\n", models.len());  
+    println!("📡 Fetched {} models from server.\n", models.len());
 
     println!("\n{}", "=".repeat(100));
     println!("Available models: {:#?}", models);
     println!("{}", "=".repeat(100));
-    
-    println!("\nCurrent model: {}", model);    
-    println!("Type a model from the list if you want to change it, otherwise just press Enter to continue with the current model.");
-    
+
+    println!("\nCurrent model: {}", model);
+    println!(
+        "Type a model from the list if you want to change it, otherwise just press Enter to continue with the current model."
+    );
+
     print!("Selected model: ");
     io::stdout().flush()?;
 
@@ -133,5 +137,4 @@ async fn ask_model(conversation: &mut Conversation, model: String, _pool: &PgPoo
         }
     }
     Ok(input_model.to_string())
-    
 }
