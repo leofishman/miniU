@@ -15,6 +15,7 @@ pub struct Conversation {
     pub buffer_limit: usize,
     pub summary: String,
     pub reflexion_task: Option<JoinHandle<()>>,
+    #[allow(dead_code)]
     pub state_board: StateBoard,
 }
 
@@ -113,10 +114,10 @@ impl Conversation {
 
         let response_text = self.client.chat(&context_to_send, pool).await?;
 
-        let client_bg = self.client.clone();
+        let _client_bg = self.client.clone();
         let pool_bg = pool.clone();
         let session_id_bg = self.session_id.clone();
-        let history_for_reflexion = self.history.clone();
+        let _history_for_reflexion = self.history.clone();
 
         let assistant_msg = ChatMessage {
             role: Role::Assistant,

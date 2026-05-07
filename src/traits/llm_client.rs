@@ -63,6 +63,7 @@ enum Delta {
     None,
 }
 
+#[allow(dead_code)]
 pub struct MemoryStatus {
     pub history_count: usize,
     pub buffer_limit: usize,
@@ -131,6 +132,7 @@ impl OpenAiClient {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn chat_raw(&self, messages: &[ChatMessage]) -> Result<String, String> {
         let response = self.call_completions(messages, false).await?;
 
@@ -148,6 +150,7 @@ impl OpenAiClient {
             .ok_or_else(|| "No se encontró contenido en la respuesta raw".to_string())
     }
 
+    #[allow(dead_code)]
     async fn call_completions(
         &self, 
         messages: &[ChatMessage], 
