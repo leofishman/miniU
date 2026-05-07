@@ -8,7 +8,6 @@ use sqlx::PgPool;
 use std::env;
 use std::io::{self, Write};
 use uuid::Uuid;
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,9 +32,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client: http_client,
     };
 
-    // 3. Iniciar sesión (podrías usar un UUID fijo para "mismo usuario")
     let session_id = Uuid::new_v4();
     let limit = 10;
+
+    
 
     // Usamos el constructor asíncrono que carga el historial
     let mut conversation = Conversation::new(client, session_id, limit, &pool).await?;

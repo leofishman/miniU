@@ -7,13 +7,38 @@ use crate::traits::llm_client::{ChatMessage, Role};
 pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
+        CREATE TABLE IF NOT EXISTS sessions (
+            id UUID PRIMARY KEY,
+            title TEXT, 
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS chat_history (
             id SERIAL PRIMARY KEY,
-            session_id UUID NOT NULL,
+            session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS session_state (
+            id SERIAL PRIMARY KEY,
+            session_id UUID NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
+            board_json JSONB NOT NULL,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
         "#
     )
     .execute(pool)

@@ -2,9 +2,9 @@ use crate::traits::llm_client::{ChatMessage, LlmClient, OpenAiClient, Role};
 use dotenvy::dotenv;
 use sqlx::PgPool;
 use std::env;
-use std::sync::Arc;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
+use serde::{Deserialize, Serialize};
 
 pub mod database;
 
@@ -15,6 +15,24 @@ pub struct Conversation {
     pub buffer_limit: usize,
     pub summary: String,
     pub reflexion_task: Option<JoinHandle<()>>,
+    pub state_board: StateBoard,
+}
+
+// session StateBoard
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct StateBoard {
+    pub inmediate_task: String,
+    pub global_vision: String,
+    // pub metrics: Metrics,
+    pub tech_stack: Vec<String>,
+    pub decision_log: Vec<DecisionAnchor>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct DecisionAnchor {
+    pub id: String, // Ejemplo: "DEC-001"
+    pub resumen: String,
+    pub message_idx: i64, // Referencia al ID en la tabla chat_history
 }
 
 impl std::fmt::Debug for Conversation {
@@ -60,6 +78,7 @@ impl Conversation {
             buffer_limit: limit,
             summary: String::new(),
             reflexion_task: None,
+            state_board: StateBoard::default(),
         })
     }
 
