@@ -1,6 +1,8 @@
 # miniU 🌌
 
-This is a personal learning project, the goal is to create an AI assistant in a terminal-based environment that can communicate with LLMs and store the conversation history in a PostgreSQL database. It is a work in progress. I am using this project to learn Rust and LLM. (:danger:) DON'T USE THIS IN PRODUCTION, IT'S JUST FOR LEARNING!!!.
+This is a personal learning project, the goal is to create an AI assistant in a terminal-based environment that can communicate with LLMs and store the conversation history in a PostgreSQL database. It is a work in progress. I am using this project to learn Rust and LLM.
+
+⛔ **DON'T USE THIS IN PRODUCTION, IT'S JUST FOR LEARNING!!!.** ⛔
 
 **miniU** is a lightweight, efficient, and modular LLM chat client written in Rust. It provides a terminal-based interactive interface to communicate with OpenAI-compatible APIs (like `llama.cpp` or Ollama) while maintaining a persistent conversation history in a PostgreSQL database.
 
