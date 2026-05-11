@@ -3,13 +3,14 @@ use sqlx::Row;
 use uuid::Uuid;
 use crate::traits::llm_client::{ChatMessage, Role};
 
-/// Initialize the database and ensure the table exists.
+/// Initialize the database and ensure the tables and indexes exist.
 pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
+    // 1. Sessions table
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS sessions (
             id UUID PRIMARY KEY,
-            title TEXT, 
+            title TEXT DEFAULT 'New Session', 
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
         "#
@@ -17,6 +18,7 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    // 2. Chat history table with 'archived' for the Forget Gate
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS chat_history (
@@ -24,6 +26,7 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
             session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
+            archived BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
         "#
@@ -31,12 +34,24 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    // 3. Partial Index for active context (Optimizes L1/L2 retrieval)
+    sqlx::query(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_chat_active_context 
+        ON chat_history (session_id) WHERE (archived = FALSE);
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    // 4. Session State (StateBoard) with versioning for Optimistic Locking
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS session_state (
             id SERIAL PRIMARY KEY,
             session_id UUID NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE,
             board_json JSONB NOT NULL,
+            version BIGINT DEFAULT 1,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
         "#
@@ -53,7 +68,7 @@ pub async fn load_history(
     session_id: &Uuid,
 ) -> Result<Vec<ChatMessage>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT role, content FROM chat_history WHERE session_id = $1 ORDER BY created_at ASC"
+        "SELECT role, content FROM chat_history WHERE session_id = $1  AND archived = FALSE ORDER BY created_at ASC"
     )
     .bind(session_id)
     .fetch_all(pool)
