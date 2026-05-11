@@ -117,3 +117,44 @@ pub async fn save_single_message(
     .await?;
     Ok(())
 }
+
+pub async fn update_state_board(
+    pool: &PgPool,
+    session_id: &Uuid,
+    incoming_data: StateBoard,
+    is_human: bool
+) -> Result<(), String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    // 1. Obtener estado actual
+    let row = sqlx::query!(
+        "SELECT board_json, version FROM session_state WHERE session_id = $1 FOR UPDATE",
+        session_id
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if let Some(row) = row {
+        let mut current_board: StateBoard = serde_json::from_value(row.board_json)
+            .map_err(|e| e.to_string())?;
+        
+        // 2. Fusionar
+        current_board.merge(incoming_data, is_human);
+
+        // 3. Guardar e incrementar versión
+        sqlx::query!(
+            "UPDATE session_state 
+             SET board_json = $1, version = version + 1, updated_at = NOW() 
+             WHERE session_id = $2",
+            serde_json::to_value(current_board).unwrap(),
+            session_id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
