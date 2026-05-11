@@ -48,6 +48,21 @@ pub struct HistoryAnchor {
 }
 
 impl StateBoard {
+    /// Generates the full system prompt including the current state for the LLM.
+    pub fn generate_system_prompt(&self) -> String {
+        let current_state_json = serde_json::to_string_pretty(self).unwrap_or_default();
+        
+        format!(
+            "### ROLE\nYou are the Strategic Planner for miniU.\n\n\
+            ### CURRENT STATEBOARD (Source of Truth)\n```json\n{}\n
+```\n\n\
+            ### INSTRUCTIONS\n\
+            1. Use 'update_state' tool ONLY if the state needs modification.\n\
+            2. Respect all L3 Guardrails in your final response.\n\
+            3. Be concise and data-driven.",
+            current_state_json
+        )
+    }
     /// Funsiona un estado propuesto (del LLM o UI) con el estado actual de la DB.
     /// Si 'is_human' es true, sus cambios tienen prioridad absoluta.
     pub fn merge(&mut self, incoming: StateBoard, is_human: bool) {

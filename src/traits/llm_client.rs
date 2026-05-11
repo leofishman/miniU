@@ -70,7 +70,31 @@ pub struct MemoryStatus {
     pub summary_length: usize,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Tool {
+    pub r#type: String, // Always "function"
+    pub function: FunctionDefinition,
+}
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FunctionDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value, // JSON Schema
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ToolCall {
+    pub id: String,
+    pub r#type: String,
+    pub function: FunctionCall,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FunctionCall {
+    pub name: String,
+    pub arguments: String, // JSON string
+}
 
 impl OpenAiClient {
     fn get_url(&self, path: &str) -> String {
@@ -150,6 +174,60 @@ impl OpenAiClient {
             .ok_or_else(|| "No se encontró contenido en la respuesta raw".to_string())
     }
 
+    pub async fn chat_with_tools(
+        &self, 
+        messages: &[ChatMessage], 
+        tools: &[Tool]
+    ) -> Result<Option<ToolCall>, String> {
+        let request_body = serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "stream": false // Tool calling is more stable without streaming in Pass 1
+        });
+
+        let response = self.client
+            .post(&self.get_url("/v1/chat/completions"))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+        
+        // Check if the model generated a tool call
+        if let Some(tool_calls) = json["choices"][0]["message"]["tool_calls"].as_array() {
+            if let Some(first_call) = tool_calls.get(0) {
+                let call: ToolCall = serde_json::from_value(first_call.clone())
+                    .map_err(|e| e.to_string())?;
+                return Ok(Some(call));
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn get_update_state_tool() -> Tool {
+        Tool {
+            r#type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "update_state".to_string(),
+                description: "Update the StateBoard layers (L1, L2, L3, L4) to maintain context.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "l1_immediate": { "type": "object" },
+                        "l2_task": { "type": "object" },
+                        "l3_semantic": { "type": "object" },
+                        "l4_history": { "type": "array", "items": { "type": "object" } }
+                    }
+                }),
+            },
+        }
+    }
+    
     #[allow(dead_code)]
     async fn call_completions(
         &self, 
