@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct StateBoard {
     pub version: u64,
     pub last_update: DateTime<Utc>,
@@ -12,14 +12,14 @@ pub struct StateBoard {
     pub l4_history: Vec<HistoryAnchor>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct L1Context {
     pub last_user_intent: String,
     pub temp_flags: Vec<String>,
     pub retrieved_context: Option<String>, 
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct L2State {
     pub active_goal: String,
     pub status: String, // "thinking", "executing", "blocked", "done"
@@ -27,20 +27,20 @@ pub struct L2State {
     pub subtasks: Vec<Subtask>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct Subtask {
     pub desc: String,
     pub completed: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct L3Core {
     pub preferences: HashMap<String, String>,
     pub guardrails: Vec<String>,
     pub facts: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct HistoryAnchor {
     pub id: String,
     pub summary: String,

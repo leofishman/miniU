@@ -1,3 +1,4 @@
+use super::StateBoard; 
 use sqlx::PgPool;
 use sqlx::Row;
 use uuid::Uuid;

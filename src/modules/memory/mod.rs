@@ -4,9 +4,6 @@ use sqlx::PgPool;
 use std::env;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
-use serde::{Deserialize, Serialize};
-
-pub mod database;
 
 pub struct Conversation {
     pub client: OpenAiClient,
@@ -15,26 +12,15 @@ pub struct Conversation {
     pub buffer_limit: usize,
     pub summary: String,
     pub reflexion_task: Option<JoinHandle<()>>,
-    #[allow(dead_code)]
-    pub state_board: StateBoard,
+    pub state_board: Option<StateBoard>,
 }
 
-// session StateBoard
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct StateBoard {
-    pub inmediate_task: String,
-    pub global_vision: String,
-    // pub metrics: Metrics,
-    pub tech_stack: Vec<String>,
-    pub decision_log: Vec<DecisionAnchor>,
-}
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct DecisionAnchor {
-    pub id: String, // Ejemplo: "DEC-001"
-    pub resumen: String,
-    pub message_idx: i64, // Referencia al ID en la tabla chat_history
-}
+pub mod database;
+pub mod state_board;
+
+pub use state_board::StateBoard;
+
 
 impl std::fmt::Debug for Conversation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -79,69 +65,96 @@ impl Conversation {
             buffer_limit: limit,
             summary: String::new(),
             reflexion_task: None,
-            state_board: StateBoard::default(),
+            state_board: Some(StateBoard::default()),
         })
     }
 
-    pub async fn ask(&mut self, question: String, pool: &PgPool) -> Result<String, String> {
-        if let Some(handle) = self.reflexion_task.take() {
-            handle.abort();
-            // println!("[System] Tarea de reflexión anterior cancelada para priorizar el nuevo mensaje.");
-        }
-
+    pub async fn ask(&mut self, user_input: String, pool: &PgPool) -> Result<String, String> {
+        // 1. Prepare current message
         let user_msg = ChatMessage {
             role: Role::User,
-            content: question,
+            content: user_input,
         };
-        database::save_single_message(pool, &self.session_id, &user_msg)
-            .await
+        
+        // Save user message to DB
+        database::save_single_message(pool, &self.session_id, &user_msg).await
             .map_err(|e| e.to_string())?;
         self.history.push(user_msg);
 
-        // Always include the first message (System) and the last N messages
-        let mut context_to_send = Vec::new();
-        if !self.history.is_empty() {
-            context_to_send.push(self.history[0].clone()); // The System Prompt
+        // 2. PASS 1: Strategic Planning (Tool Call Check)
+        // We inject the StateBoard as a System Prompt
+        let system_prompt = self.state_board.as_ref()
+            .map(|sb| sb.generate_system_prompt())
+            .unwrap_or_default();
 
-            let tail_start = if self.history.len() > self.buffer_limit {
-                self.history.len() - self.buffer_limit
-            } else {
-                1 // Start after the System Prompt
-            };
+        let mut context = vec![ChatMessage {
+            role: Role::System,
+            content: system_prompt,
+        }];
+        context.extend(self.history.clone());
 
-            context_to_send.extend(self.history[tail_start..].iter().cloned());
+        let tool = crate::traits::llm_client::get_update_state_tool();
+        let tool_call = self.client.chat_with_tools(&context, &[tool]).await?;
+
+        // 3. Handle State Update if the LLM requested it
+        if let Some(call) = tool_call {
+            if call.function.name == "update_state" {
+                let incoming_state: StateBoard = serde_json::from_str(&call.function.arguments)
+                    .map_err(|e| format!("Invalid StateBoard JSON from LLM: {}", e))?;
+                
+                // Perform Deep Merge and update DB/Local state
+                crate::modules::memory::database::update_state_board(
+                    pool, 
+                    &self.session_id, 
+                    incoming_state, 
+                    false // is_human = false
+                ).await?;
+                
+                // Reload state from DB to ensure consistency
+                self.load_state_board(pool).await?;
+            }
         }
 
-        let response_text = self.client.chat(&context_to_send, pool).await?;
+        // 4. PASS 2: Generation (Natural Language Response)
+        // Refresh context with the potentially updated StateBoard
+        let updated_system_prompt = self.state_board.as_ref()
+            .map(|sb| sb.generate_system_prompt())
+            .unwrap_or_default();
 
-        let _client_bg = self.client.clone();
-        let pool_bg = pool.clone();
-        let session_id_bg = self.session_id.clone();
-        let _history_for_reflexion = self.history.clone();
+        let mut final_context = vec![ChatMessage {
+            role: Role::System,
+            content: updated_system_prompt,
+        }];
+        final_context.extend(self.history.clone());
 
+        let response_text = self.client.chat(&final_context, pool).await?;
+
+        // 5. Finalize turn
         let assistant_msg = ChatMessage {
             role: Role::Assistant,
             content: response_text.clone(),
         };
-        let assistant_msg_bg = assistant_msg.clone();
+        
+        database::save_single_message(pool, &self.session_id, &assistant_msg).await
+            .map_err(|e| e.to_string())?;
         self.history.push(assistant_msg);
 
-        let handle = tokio::spawn(async move {
-            // Guardado en DB y futura reflexión...
-            let _ =
-                database::save_single_message(&pool_bg, &session_id_bg, &assistant_msg_bg).await;
-            // Por ahora, solo un placeholder para probar que corre
-            // let _ = actualizar_tablero(client_bg, pool_bg, session_id_bg, history_for_reflexion).await;
-            // Simulación de proceso pesado
-            // tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            // println!("[Background] Reflexión completada.");
-        });
-
-        self.reflexion_task = Some(handle);
-
-
-
         Ok(response_text)
+    }
+
+    async fn load_state_board(&mut self, pool: &PgPool) -> Result<(), String> {
+        let row = sqlx::query!(
+            "SELECT board_json FROM session_state WHERE session_id = $1",
+            self.session_id
+        )
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        if let Some(r) = row {
+            self.state_board = Some(serde_json::from_value(r.board_json).map_err(|e| e.to_string())?);
+        }
+        Ok(())
     }
 
     pub async fn load_history(

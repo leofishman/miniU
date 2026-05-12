@@ -175,10 +175,10 @@ impl OpenAiClient {
     }
 
     pub async fn chat_with_tools(
-        &self, 
-        messages: &[ChatMessage], 
-        tools: &[Tool]
-    ) -> Result<Option<ToolCall>, String> {
+            &self, 
+            messages: &[ChatMessage], 
+            tools: &[Tool]
+        ) -> Result<Option<ToolCall>, String> {
         let request_body = serde_json::json!({
             "model": self.model,
             "messages": messages,
@@ -209,24 +209,6 @@ impl OpenAiClient {
         Ok(None)
     }
 
-    pub fn get_update_state_tool() -> Tool {
-        Tool {
-            r#type: "function".to_string(),
-            function: FunctionDefinition {
-                name: "update_state".to_string(),
-                description: "Update the StateBoard layers (L1, L2, L3, L4) to maintain context.".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "l1_immediate": { "type": "object" },
-                        "l2_task": { "type": "object" },
-                        "l3_semantic": { "type": "object" },
-                        "l4_history": { "type": "array", "items": { "type": "object" } }
-                    }
-                }),
-            },
-        }
-    }
     
     #[allow(dead_code)]
     async fn call_completions(
@@ -248,6 +230,26 @@ impl OpenAiClient {
             .map_err(|e| e.to_string())
     }
 }
+
+pub fn get_update_state_tool() -> Tool {
+    Tool {
+        r#type: "function".to_string(),
+        function: FunctionDefinition {
+            name: "update_state".to_string(),
+            description: "Update the StateBoard layers (L1, L2, L3, L4) to maintain context.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "l1_immediate": { "type": "object" },
+                    "l2_task": { "type": "object" },
+                    "l3_semantic": { "type": "object" },
+                    "l4_history": { "type": "array", "items": { "type": "object" } }
+                }
+            }),
+        },
+    }
+}
+
 
 #[async_trait]
 impl LlmClient for OpenAiClient {
