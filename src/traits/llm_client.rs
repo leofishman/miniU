@@ -1,10 +1,10 @@
-use serde::{Serialize, Deserialize};
-use sqlx::PgPool;
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
-use std::io::Write;
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use std::fs::OpenOptions;
+use std::io::Write;
 
 // remove after getting uuid from conversation
 use crate::Uuid;
@@ -33,6 +33,11 @@ pub struct ChatRequest<'a> {
 #[async_trait]
 pub trait LlmClient {
     async fn chat(&self, messages: &[ChatMessage], _pool: &PgPool) -> Result<String, String>;
+    async fn chat_with_tools(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[Tool],
+    ) -> Result<Option<ToolCall>, String>;
     async fn list_models(&self) -> Result<Vec<String>, String>;
 }
 
@@ -106,8 +111,8 @@ impl OpenAiClient {
             format!("http://{}/{}", base, path)
         }
     }
-    
-    fn extract_delta<'a>(&self, json: &'a serde_json::Value) -> Delta { 
+
+    fn extract_delta<'a>(&self, json: &'a serde_json::Value) -> Delta {
         if let Some(choices) = json["choices"].as_array() {
             if let Some(delta) = choices.get(0).and_then(|c| c.get("delta")) {
                 if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
@@ -122,35 +127,43 @@ impl OpenAiClient {
     }
 
     fn log_reasoning(&self, content: &str, session_id: &Uuid) {
-        if content.is_empty() { return; }
+        if content.is_empty() {
+            return;
+        }
         // Crear la carpeta logs si no existe
         let _ = std::fs::create_dir_all("logs");
-        // TODO: Add logging filename by session_id from Conversation struct 
+        // TODO: Add logging filename by session_id from Conversation struct
         let log_file = format!("logs/{}.log", session_id);
-        
-        if let Ok(mut file) = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_file) {
-                let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                let _ = writeln!(file, "\n--- SESSION {} [{}] ---\n{}\n", self.model, timestamp, content);
-            }
+
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_file) {
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+            let _ = writeln!(
+                file,
+                "\n--- SESSION {} [{}] ---\n{}\n",
+                self.model, timestamp, content
+            );
+        }
     }
 
     fn log_metrics(&self, json: &serde_json::Value) {
         if let Some(usage_val) = json.get("usage") {
             if let Ok(usage) = serde_json::from_value::<Usage>(usage_val.clone()) {
                 eprintln!("\n\n--- LLM Usage ---");
-                eprintln!("Tokens used: {} (Prompt: {}, Completion: {})", 
-                    usage.total_tokens, usage.prompt_tokens, usage.completion_tokens);
+                eprintln!(
+                    "Tokens used: {} (Prompt: {}, Completion: {})",
+                    usage.total_tokens, usage.prompt_tokens, usage.completion_tokens
+                );
                 eprintln!("-----------------");
             }
         }
         if let Some(timings_val) = json.get("timings") {
             if let Ok(timings) = serde_json::from_value::<Timings>(timings_val.clone()) {
                 eprintln!("\n\n--- Performance ---");
-                eprintln!("\t\tTime: {:.2}s \t|\t Speed: {:.2} t/s", 
-                    timings.predicted_ms / 1000.0, timings.predicted_per_second);
+                eprintln!(
+                    "\t\tTime: {:.2}s \t|\t Speed: {:.2} t/s",
+                    timings.predicted_ms / 1000.0,
+                    timings.predicted_per_second
+                );
                 eprintln!("-----------------\n");
             }
         }
@@ -166,7 +179,7 @@ impl OpenAiClient {
 
         // Para tareas raw, parseamos el JSON completo de la respuesta de OpenAI
         let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-        
+
         // Extraemos el contenido del primer choice
         json["choices"][0]["message"]["content"]
             .as_str()
@@ -174,47 +187,11 @@ impl OpenAiClient {
             .ok_or_else(|| "No se encontró contenido en la respuesta raw".to_string())
     }
 
-    pub async fn chat_with_tools(
-            &self, 
-            messages: &[ChatMessage], 
-            tools: &[Tool]
-        ) -> Result<Option<ToolCall>, String> {
-        let request_body = serde_json::json!({
-            "model": self.model,
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
-            "stream": false // Tool calling is more stable without streaming in Pass 1
-        });
-
-        let response = self.client
-            .post(&self.get_url("/v1/chat/completions"))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-        
-        // Check if the model generated a tool call
-        if let Some(tool_calls) = json["choices"][0]["message"]["tool_calls"].as_array() {
-            if let Some(first_call) = tool_calls.get(0) {
-                let call: ToolCall = serde_json::from_value(first_call.clone())
-                    .map_err(|e| e.to_string())?;
-                return Ok(Some(call));
-            }
-        }
-
-        Ok(None)
-    }
-
-    
     #[allow(dead_code)]
     async fn call_completions(
-        &self, 
-        messages: &[ChatMessage], 
-        stream: bool
+        &self,
+        messages: &[ChatMessage],
+        stream: bool,
     ) -> Result<reqwest::Response, String> {
         let request_body = ChatRequest {
             model: &self.model,
@@ -222,7 +199,8 @@ impl OpenAiClient {
             stream,
         };
 
-        self.client.post(&self.get_url("/v1/chat/completions"))
+        self.client
+            .post(&self.get_url("/v1/chat/completions"))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&request_body)
             .send()
@@ -236,30 +214,67 @@ pub fn get_update_state_tool() -> Tool {
         r#type: "function".to_string(),
         function: FunctionDefinition {
             name: "update_state".to_string(),
-            description: "Update the StateBoard layers (L1, L2, L3, L4) to maintain context.".to_string(),
+            description: "Update the StateBoard representing the shared workspace state."
+                .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "l1_immediate": { "type": "object" },
-                    "l2_task": { "type": "object" },
-                    "l3_semantic": { "type": "object" },
-                    "l4_history": { "type": "array", "items": { "type": "object" } }
+                    "plan": { "type": "object" },
+                    "task_list": { "type": "object" },
+                    "notes": { "type": "object" },
+                    "workspace": { "type": "object" }
                 }
             }),
         },
     }
 }
 
-
 #[async_trait]
 impl LlmClient for OpenAiClient {
+    async fn chat_with_tools(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[Tool],
+    ) -> Result<Option<ToolCall>, String> {
+        let request_body = serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "stream": false
+        });
+
+        let response = self
+            .client
+            .post(&self.get_url("/v1/chat/completions"))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+
+        if let Some(tool_calls) = json["choices"][0]["message"]["tool_calls"].as_array() {
+            if let Some(first_call) = tool_calls.get(0) {
+                let call: ToolCall =
+                    serde_json::from_value(first_call.clone()).map_err(|e| e.to_string())?;
+                return Ok(Some(call));
+            }
+        }
+
+        Ok(None)
+    }
+
     async fn chat(&self, messages: &[ChatMessage], _pool: &PgPool) -> Result<String, String> {
         let request_body = ChatRequest {
             model: &self.model,
             messages,
             stream: true,
         };
-        let response = self.client.post(&self.get_url("/v1/chat/completions"))
+        let response = self
+            .client
+            .post(&self.get_url("/v1/chat/completions"))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&request_body)
             .send()
@@ -271,31 +286,39 @@ impl LlmClient for OpenAiClient {
             let body = response.text().await.map_err(|e| e.to_string())?;
             return Err(format!("Server error {}: {}", status, body));
         }
-        
+
         let multi = MultiProgress::new();
 
         // NIVEL 1: Estado General
         let pb_main = multi.add(ProgressBar::new_spinner());
-        pb_main.set_style(ProgressStyle::default_spinner().template("{spinner:.green} {msg}").unwrap());
+        pb_main.set_style(
+            ProgressStyle::default_spinner()
+                .template("{spinner:.green} {msg}")
+                .unwrap(),
+        );
         pb_main.set_message("Conectando con el cerebro...");
         pb_main.enable_steady_tick(std::time::Duration::from_millis(100));
 
         // NIVEL 2: Razonamiento
         let pb_reasoning = multi.add(ProgressBar::new_spinner());
-        pb_reasoning.set_style(ProgressStyle::default_spinner()
-            .template("\x1b[2m{spinner:.blue} [Pensando]: {msg}\x1b[0m") 
-            .unwrap());
+        pb_reasoning.set_style(
+            ProgressStyle::default_spinner()
+                .template("\x1b[2m{spinner:.blue} [Pensando]: {msg}\x1b[0m")
+                .unwrap(),
+        );
 
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut stream_done = false;
-        
+
         let mut reasoning_full = String::new();
         let mut response_full = String::new();
         let mut first_content_token = true;
 
         while let Some(chunk) = stream.next().await {
-            if stream_done { break; }
+            if stream_done {
+                break;
+            }
             let chunk = chunk.map_err(|e| e.to_string())?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -305,9 +328,9 @@ impl LlmClient for OpenAiClient {
 
                 if line.starts_with("data:") {
                     let data = &line["data:".len()..].trim();
-                    if *data == "[DONE]" { 
+                    if *data == "[DONE]" {
                         stream_done = true;
-                        break; 
+                        break;
                     }
 
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
@@ -322,10 +345,10 @@ impl LlmClient for OpenAiClient {
                                 if first_content_token {
                                     pb_main.finish_and_clear();
                                     pb_reasoning.finish_and_clear();
-                                    
+
                                     // Log de razonamiento (ahora que sabemos que empezó la respuesta)
-                                    self.log_reasoning(&reasoning_full, &uuid::Uuid::nil()); 
-                                    
+                                    self.log_reasoning(&reasoning_full, &uuid::Uuid::nil());
+
                                     print!("Assistant: ");
                                     std::io::stdout().flush().unwrap();
                                     first_content_token = false;
@@ -347,7 +370,7 @@ impl LlmClient for OpenAiClient {
             pb_main.finish_and_clear();
             pb_reasoning.finish_and_clear();
         }
-        println!(); 
+        println!();
 
         if response_full.is_empty() {
             return Err("El modelo no devolvió ninguna respuesta.".to_string());
@@ -357,7 +380,9 @@ impl LlmClient for OpenAiClient {
     }
 
     async fn list_models(&self) -> Result<Vec<String>, String> {
-        let response = self.client.get(&self.get_url("/v1/models"))
+        let response = self
+            .client
+            .get(&self.get_url("/v1/models"))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .send()
             .await

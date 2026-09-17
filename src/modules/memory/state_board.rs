@@ -1,125 +1,99 @@
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct StateBoard {
     pub version: u64,
     pub last_update: DateTime<Utc>,
-    pub l1_immediate: L1Context,
-    pub l2_task: L2State,
-    pub l3_semantic: L3Core,
-    pub l4_history: Vec<HistoryAnchor>,
+    pub plan: Plan,
+    pub task_list: TaskList,
+    pub notes: Notes,
+    pub workspace: WorkspaceArtifacts,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct L1Context {
-    pub last_user_intent: String,
-    pub temp_flags: Vec<String>,
-    pub retrieved_context: Option<String>, 
+pub struct Plan {
+    pub execution_strategy: String,
+    pub milestones: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct L2State {
-    pub active_goal: String,
-    pub status: String, // "thinking", "executing", "blocked", "done"
-    pub progress: f32,   // 0.0 to 1.0
-    pub subtasks: Vec<Subtask>,
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Failed,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct Subtask {
-    pub desc: String,
-    pub completed: bool,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct L3Core {
-    pub preferences: HashMap<String, String>,
-    pub guardrails: Vec<String>,
-    pub facts: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-pub struct HistoryAnchor {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Task {
     pub id: String,
-    pub summary: String,
-    pub msg_ids: Vec<i32>,
+    pub description: String,
+    pub status: TaskStatus,
+    pub assigned_worker: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct TaskList {
+    pub tasks: Vec<Task>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct Notes {
+    pub architectural_decisions: Vec<String>,
+    pub interfaces: Vec<String>,
+    pub edge_cases: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct WorkspaceArtifacts {
+    pub code_paths: Vec<String>,
+    pub diff_paths: Vec<String>,
+    pub test_paths: Vec<String>,
 }
 
 impl StateBoard {
-    /// Generates the full system prompt including the current state for the LLM.
-    pub fn generate_system_prompt(&self) -> String {
-        let current_state_json = serde_json::to_string_pretty(self).unwrap_or_default();
-        
-        format!(
-            "### ROLE\nYou are the Strategic Planner for miniU.\n\n\
-            ### CURRENT STATEBOARD (Source of Truth)\n```json\n{}\n
-```\n\n\
-            ### INSTRUCTIONS\n\
-            1. Use 'update_state' tool ONLY if the state needs modification.\n\
-            2. Respect all L3 Guardrails in your final response.\n\
-            3. Be concise and data-driven.",
-            current_state_json
-        )
-    }
-    /// Funsiona un estado propuesto (del LLM o UI) con el estado actual de la DB.
-    /// Si 'is_human' es true, sus cambios tienen prioridad absoluta.
-    pub fn merge(&mut self, incoming: StateBoard, is_human: bool) {
-        // 1. Meta & Version: Siempre incrementamos la versión global
+    pub fn merge(&mut self, incoming: StateBoard) {
         self.version += 1;
         self.last_update = Utc::now();
 
-        // 2. L1 - Contexto Inmediato: El LLM es el autor principal, 
-        // pero el humano puede resetearlo.
-        if is_human {
-            self.l1_immediate = incoming.l1_immediate;
-        } else {
-            // El LLM actualiza la intención y flags
-            self.l1_immediate.last_user_intent = incoming.l1_immediate.last_user_intent;
-            self.l1_immediate.temp_flags = incoming.l1_immediate.temp_flags;
-            // El retrieved_context solo cambia si el LLM lo pide explícitamente
-            if incoming.l1_immediate.retrieved_context.is_some() {
-                self.l1_immediate.retrieved_context = incoming.l1_immediate.retrieved_context;
+        // Deep-merging logic
+        self.plan = incoming.plan;
+
+        // Merge Tasks
+        for incoming_task in incoming.task_list.tasks {
+            if let Some(existing_task) = self
+                .task_list
+                .tasks
+                .iter_mut()
+                .find(|t| t.id == incoming_task.id)
+            {
+                existing_task.description = incoming_task.description;
+                existing_task.status = incoming_task.status;
+                existing_task.assigned_worker = incoming_task.assigned_worker;
+            } else {
+                self.task_list.tasks.push(incoming_task);
             }
         }
 
-        // 3. L2 - Estado de Tarea: Fusión de sub-tareas
-        if is_human {
-            // Si el humano toca L2, su visión es la ley (ej. cancelar todo)
-            self.l2_task = incoming.l2_task;
-        } else {
-            // El LLM actualiza progreso y estado
-            self.l2_task.status = incoming.l2_task.status;
-            self.l2_task.progress = incoming.l2_task.progress;
-            
-            // Merge inteligente de sub-tareas: no borramos las que el LLM no mencione
-            // a menos que el LLM envíe una lista completa nueva.
-            self.l2_task.subtasks = incoming.l2_task.subtasks;
-        }
-
-        // 4. L3 - Núcleo Semántico (Guardrails y Hechos)
-        if is_human {
-            // El humano es el "Owner" de las reglas
-            self.l3_semantic = incoming.l3_semantic;
-        } else {
-            // El LLM solo puede AÑADIR hechos o preferencias, nunca borrar guardrails.
-            for fact in incoming.l3_semantic.facts {
-                if !self.l3_semantic.facts.contains(&fact) {
-                    self.l3_semantic.facts.push(fact);
-                }
+        // Merge Notes
+        for decision in incoming.notes.architectural_decisions {
+            if !self.notes.architectural_decisions.contains(&decision) {
+                self.notes.architectural_decisions.push(decision);
             }
-            // Fusionar preferencias (sin sobreescribir las del usuario)
-            for (key, value) in incoming.l3_semantic.preferences {
-                self.l3_semantic.preferences.entry(key).or_insert(value);
+        }
+        for interface in incoming.notes.interfaces {
+            if !self.notes.interfaces.contains(&interface) {
+                self.notes.interfaces.push(interface);
+            }
+        }
+        for edge_case in incoming.notes.edge_cases {
+            if !self.notes.edge_cases.contains(&edge_case) {
+                self.notes.edge_cases.push(edge_case);
             }
         }
 
-        // 5. L4 - Historia: El LLM solo hace Append (Añadir al final)
-        for anchor in incoming.l4_history {
-            if !self.l4_history.iter().any(|a| a.id == anchor.id) {
-                self.l4_history.push(anchor);
-            }
-        }
+        // Update workspace
+        self.workspace = incoming.workspace;
     }
 }

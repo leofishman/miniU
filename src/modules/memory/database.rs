@@ -1,8 +1,7 @@
-use super::StateBoard; 
+use super::StateBoard;
 use sqlx::PgPool;
 use sqlx::Row;
 use uuid::Uuid;
-use crate::traits::llm_client::{ChatMessage, Role};
 
 /// Initialize the database and ensure the tables and indexes exist.
 pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
@@ -14,38 +13,12 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
             title TEXT DEFAULT 'New Session', 
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
-        "#
+        "#,
     )
     .execute(pool)
     .await?;
 
-    // 2. Chat history table with 'archived' for the Forget Gate
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS chat_history (
-            id SERIAL PRIMARY KEY,
-            session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            archived BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );
-        "#
-    )
-    .execute(pool)
-    .await?;
-
-    // 3. Partial Index for active context (Optimizes L1/L2 retrieval)
-    sqlx::query(
-        r#"
-        CREATE INDEX IF NOT EXISTS idx_chat_active_context 
-        ON chat_history (session_id) WHERE (archived = FALSE);
-        "#
-    )
-    .execute(pool)
-    .await?;
-
-    // 4. Session State (StateBoard) with versioning for Optimistic Locking
+    // 2. Session State (StateBoard) with versioning for Optimistic Locking
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS session_state (
@@ -55,7 +28,7 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
             version BIGINT DEFAULT 1,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
         );
-        "#
+        "#,
     )
     .execute(pool)
     .await?;
@@ -63,59 +36,50 @@ pub async fn init_db(pool: &PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-/// Load chat history for a given session, ordered by creation time.
-pub async fn load_history(
+pub async fn load_state_board(
     pool: &PgPool,
     session_id: &Uuid,
-) -> Result<Vec<ChatMessage>, sqlx::Error> {
-    let rows = sqlx::query(
-        "SELECT role, content FROM chat_history WHERE session_id = $1  AND archived = FALSE ORDER BY created_at ASC"
-    )
-    .bind(session_id)
-    .fetch_all(pool)
-    .await?;
+) -> Result<Option<StateBoard>, sqlx::Error> {
+    let row = sqlx::query("SELECT board_json FROM session_state WHERE session_id = $1")
+        .bind(session_id)
+        .fetch_optional(pool)
+        .await?;
 
-    let history = rows
-        .into_iter()
-        .map(|row| {
-            let role_str: String = row.get("role");
-            let content: String = row.get("content");
-            let role = match role_str.to_lowercase().as_str() {
-                "user" => Role::User,
-                "assistant" => Role::Assistant,
-                "system" => Role::System,
-                _ => Role::User,
-            };
-            ChatMessage {
-                role,
-                content,
-            }
-        })
-        .collect();
-
-    Ok(history)
+    if let Some(row) = row {
+        let board_json: serde_json::Value = row.get("board_json");
+        let board: StateBoard =
+            serde_json::from_value(board_json).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        Ok(Some(board))
+    } else {
+        Ok(None)
+    }
 }
 
-/// Save a single message to the database.
-pub async fn save_single_message(
+pub async fn init_session_state(
     pool: &PgPool,
     session_id: &Uuid,
-    message: &ChatMessage,
-) -> Result<(), sqlx::Error> {
-    let role_str = match message.role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
-        Role::System => "system",
-    };
+    initial_state: &StateBoard,
+) -> Result<(), String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    sqlx::query(
-        "INSERT INTO chat_history (session_id, role, content) VALUES ($1, $2, $3)"
-    )
-    .bind(session_id)
-    .bind(role_str)
-    .bind(&message.content)
-    .execute(pool)
-    .await?;
+    // Insert session if not exists
+    sqlx::query("INSERT INTO sessions (id, title) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING")
+        .bind(session_id)
+        .bind("Zero-Shot Orchestration")
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Insert session_state if not exists
+    let state_json = serde_json::to_value(initial_state).map_err(|e| e.to_string())?;
+    sqlx::query("INSERT INTO session_state (session_id, board_json) VALUES ($1, $2) ON CONFLICT (session_id) DO NOTHING")
+        .bind(session_id)
+        .bind(state_json)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -123,37 +87,46 @@ pub async fn update_state_board(
     pool: &PgPool,
     session_id: &Uuid,
     incoming_data: StateBoard,
-    is_human: bool
 ) -> Result<(), String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    // 1. Obtener estado actual
-    let row = sqlx::query!(
+    // 1. Fetch current state
+    let row = sqlx::query(
         "SELECT board_json, version FROM session_state WHERE session_id = $1 FOR UPDATE",
-        session_id
     )
+    .bind(session_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
 
     if let Some(row) = row {
-        let mut current_board: StateBoard = serde_json::from_value(row.board_json)
-            .map_err(|e| e.to_string())?;
-        
+        let board_json: serde_json::Value = row.get("board_json");
+        let mut current_board: StateBoard =
+            serde_json::from_value(board_json).map_err(|e| e.to_string())?;
+
         // 2. Fusionar
-        current_board.merge(incoming_data, is_human);
+        current_board.merge(incoming_data);
 
         // 3. Guardar e incrementar versión
-        sqlx::query!(
+        sqlx::query(
             "UPDATE session_state 
              SET board_json = $1, version = version + 1, updated_at = NOW() 
              WHERE session_id = $2",
-            serde_json::to_value(current_board).unwrap(),
-            session_id
         )
+        .bind(serde_json::to_value(current_board).unwrap())
+        .bind(session_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
+    } else {
+        // Fallback: If for some reason the row doesn't exist, we insert the incoming data directly
+        let state_json = serde_json::to_value(&incoming_data).map_err(|e| e.to_string())?;
+        sqlx::query("INSERT INTO session_state (session_id, board_json) VALUES ($1, $2)")
+            .bind(session_id)
+            .bind(state_json)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     tx.commit().await.map_err(|e| e.to_string())?;
