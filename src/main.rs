@@ -1,13 +1,13 @@
 mod modules;
 mod traits;
 
-use crate::modules::memory::Conversation;
+use crate::modules::memory::OrchestrationSession;
 use crate::modules::memory::StateBoard;
 use crate::modules::memory::state_board::TaskStatus;
 use crate::modules::orchestrator::{is_done, manager_step};
 use crate::modules::verifier;
 use crate::modules::worker::worker_step;
-use crate::traits::llm_client::{LlmClient, OpenAiClient};
+use crate::traits::llm_client::OpenAiClient;
 
 use dotenvy::dotenv;
 use sqlx::PgPool;
@@ -21,29 +21,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL no definida");
     let llm_url = env::var("LLM_BASE_URL").expect("LLM_BASE_URL no definida");
-    let model = env::var("MODEL_NAME").expect("MODEL_NAME no definido");
+
+    let manager_model =
+        env::var("MANAGER_MODEL").unwrap_or_else(|_| "manager-model-default".to_string());
+    let worker_model =
+        env::var("WORKER_MODEL").unwrap_or_else(|_| "worker-model-default".to_string());
 
     let pool = PgPool::connect(&database_url).await?;
     crate::modules::memory::database::init_db(&pool).await?;
 
-    let http_client = reqwest::Client::new();
-    let client = OpenAiClient {
+    let manager_client = OpenAiClient {
+        api_key: "".to_string(),
+        base_url: llm_url.clone(),
+        model: manager_model,
+        client: reqwest::Client::new(),
+    };
+
+    let worker_client = OpenAiClient {
         api_key: "".to_string(),
         base_url: llm_url,
-        model: model.clone(),
-        client: http_client,
+        model: worker_model,
+        client: reqwest::Client::new(),
     };
 
     let session_id = Uuid::new_v4();
 
     // Start fresh state or load existing
-    let mut conversation = Conversation::new(client, session_id, &pool).await?;
+    let mut session =
+        OrchestrationSession::new(manager_client, worker_client, session_id, &pool).await?;
 
-    if conversation.state_board.is_none() {
+    if session.state_board.is_none() {
         let initial_state = StateBoard::default();
         crate::modules::memory::database::init_session_state(&pool, &session_id, &initial_state)
             .await?;
-        conversation.state_board = Some(initial_state);
+        session.state_board = Some(initial_state);
     }
 
     let problem_definition = fs::read_to_string("problem.md")
@@ -63,14 +74,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rounds += 1;
         println!("==== ROUND {} ====", rounds);
 
-        let mut state_board = conversation.state_board.take().unwrap();
+        let mut state_board = session.state_board.take().unwrap();
 
         // 1. Manager Step
         println!("🧠 Manager evaluating state...");
         manager_step(
             &problem_definition,
             &mut state_board,
-            &conversation.client,
+            &session.manager_client,
             &pool,
         )
         .await?;
@@ -78,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 2. Check Completion Criteria
         if is_done(&state_board) {
             println!("✅ Manager decides we are done. Terminating.");
-            conversation.state_board = Some(state_board);
+            session.state_board = Some(state_board);
             break;
         }
 
@@ -93,7 +104,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Clone task so we can borrow state_board mutably in worker_step
             let task = state_board.task_list.tasks[index].clone();
             println!("⚙️ Worker executing task: {}", task.description);
-            if let Err(e) = worker_step(&task, &mut state_board, &conversation.client, &pool).await
+            if let Err(e) =
+                worker_step(&task, &mut state_board, &session.worker_client, &pool).await
             {
                 println!("❌ Worker failed: {}", e);
                 state_board.task_list.tasks[index].status = TaskStatus::Failed;
@@ -147,7 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
 
-        conversation.state_board = Some(state_board);
+        session.state_board = Some(state_board);
         println!("\n");
     }
 
