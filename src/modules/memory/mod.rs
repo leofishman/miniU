@@ -8,44 +8,41 @@ pub mod state_board;
 pub use state_board::StateBoard;
 
 #[derive(Clone)]
-pub struct Conversation {
-    pub client: OpenAiClient,
+pub struct OrchestrationSession {
+    pub manager_client: OpenAiClient,
+    pub worker_client: OpenAiClient,
     pub session_id: Uuid,
     pub state_board: Option<StateBoard>,
 }
 
-impl std::fmt::Debug for Conversation {
+impl std::fmt::Debug for OrchestrationSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Conversation")
+        f.debug_struct("OrchestrationSession")
             .field("session_id", &self.session_id)
+            .field("manager_model", &self.manager_client.model)
+            .field("worker_model", &self.worker_client.model)
             .field("state_board", &self.state_board)
             .finish()
     }
 }
 
-impl Conversation {
+impl OrchestrationSession {
     pub async fn new(
-        client: OpenAiClient,
+        manager_client: OpenAiClient,
+        worker_client: OpenAiClient,
         session_id: Uuid,
         pool: &PgPool,
     ) -> Result<Self, String> {
-        let mut conv = Self {
-            client,
+        let mut session = Self {
+            manager_client,
+            worker_client,
             session_id,
             state_board: None,
         };
 
-        conv.load_state_board(pool).await?;
+        session.load_state_board(pool).await?;
 
-        Ok(conv)
-    }
-
-    pub fn set_model(&mut self, model: String, available_models: &[String]) -> Result<(), String> {
-        if !available_models.contains(&model) {
-            return Err(format!("Model {} not found on the server.", model));
-        }
-        self.client.model = model;
-        Ok(())
+        Ok(session)
     }
 
     async fn load_state_board(&mut self, pool: &PgPool) -> Result<(), String> {
